@@ -1,0 +1,25 @@
+# Netlify config for the K&D Lead Prequalification Portal.
+# Netlify's Next.js plugin handles the build automatically, so this file is
+# mostly about explicit node version + ensuring the right plugin runs.
+
+[build]
+  command = "npm run build"
+  publish = ".next"
+
+[build.environment]
+  NODE_VERSION = "20"
+  # Netlify sets NEXT_PRIVATE_TARGET automatically when the Next plugin is active.
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
+
+# All API routes under /api/* run as Netlify Functions automatically via the
+# plugin. No manual redirects needed — Next.js App Router handling is native.
+
+# A gentle default cache header for the static chat assets. Next already
+# sets immutable headers for its hashed chunks, but this catches the root.
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Frame-Options = "SAMEORIGIN"
+    Referrer-Policy = "strict-origin-when-cross-origin"
