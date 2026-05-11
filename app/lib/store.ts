@@ -1,147 +1,152 @@
-// Tiny in-memory lead store so the admin dashboard has something to render
-// during local testing. In production this should be a real DB (Postgres/Supabase)
-// or a HubSpot read-back. This is intentionally NOT persisted across server restarts.
+// Supabase-backed lead store. Reads/writes to lead_intake.leads and
+// lead_intake.routing in the K&D Database. Replaces the in-memory Map
+// that was used during development.
 
+import { leadIntake } from './supabase';
 import type { Answers, Lead, RoutingResult, StoredLead } from './types';
 
-declare global {
-  // eslint-disable-next-line no-var
-  var __KND_LEAD_STORE: Map<string, StoredLead> | undefined;
+interface SaveLeadInput {
+  id: string;
+  lead: Lead;
+  answers: Answers;
+  routing: RoutingResult;
+  closingMessage: string;
+  receivedAt: string;
 }
 
-function db(): Map<string, StoredLead> {
-  if (!global.__KND_LEAD_STORE) {
-    global.__KND_LEAD_STORE = new Map();
-    seed(global.__KND_LEAD_STORE);
-  }
-  return global.__KND_LEAD_STORE;
-}
-
-export function saveLead(payload: { id: string; lead: Lead; answers: Answers; routing: RoutingResult; closingMessage: string; receivedAt: string }): StoredLead {
-  const stored: StoredLead = {
-    id: payload.id,
-    lead: payload.lead,
-    answers: payload.answers,
-    routing: payload.routing,
-    closingMessage: payload.closingMessage,
-    receivedAt: payload.receivedAt,
+// Reverse of buildAnswers — flatten the structured chat answers into the
+// flat columns we store in lead_intake.leads. Keeps the schema queryable
+// from K&D OS without JSON-poking.
+function answersToRow(lead: Lead, answers: Answers, receivedAt: string) {
+  return {
+    hubspot_contact_id: lead.hubspotContactId ?? null,
+    first_name: lead.firstName ?? null,
+    email: lead.email ?? null,
+    phone: answers.phone ?? null,
+    original_inquiry: lead.originalInquiry ?? null,
+    consent: answers.consent ?? null,
+    scope: answers.scope ?? null,
+    scope_detail: answers.scopeDetail ?? null,
+    budget_raw: answers.budget?.raw ?? null,
+    budget_label: answers.budget?.label ?? null,
+    budget_tier: answers.budget?.tier ?? null,
+    timeline: answers.timeline ?? null,
+    address: answers.address?.address ?? null,
+    address_lat: answers.address?.lat ? Number(answers.address.lat) : null,
+    address_lon: answers.address?.lon ? Number(answers.address.lon) : null,
+    union_status: answers.union ?? null,
+    completed: true,
+    last_step: 'completed',
+    received_at: receivedAt,
   };
-  db().set(payload.id, stored);
-  return stored;
 }
 
-export function listLeads(): StoredLead[] {
-  return Array.from(db().values()).sort((a, b) => b.receivedAt.localeCompare(a.receivedAt));
+// Hydrate back to the StoredLead shape the admin UI expects.
+function rowToStored(leadRow: any, routingRow: any | null): StoredLead {
+  const answers: Answers = {
+    consent: leadRow.consent ?? undefined,
+    scope: leadRow.scope ?? undefined,
+    scopeDetail: leadRow.scope_detail ?? undefined,
+    budget: leadRow.budget_label
+      ? { raw: leadRow.budget_raw != null ? Number(leadRow.budget_raw) : null, label: leadRow.budget_label, tier: leadRow.budget_tier ?? '' }
+      : undefined,
+    timeline: leadRow.timeline ?? undefined,
+    address: leadRow.address ? { address: leadRow.address, lat: leadRow.address_lat ?? undefined, lon: leadRow.address_lon ?? undefined } : undefined,
+    photos: { files: [], skipped: true },  // TODO populate from lead_intake.photos when we wire that up
+    phone: leadRow.phone ?? undefined,
+    union: leadRow.union_status ?? undefined,
+  };
+  const lead: Lead = {
+    firstName: leadRow.first_name ?? undefined,
+    originalInquiry: leadRow.original_inquiry ?? undefined,
+    email: leadRow.email ?? undefined,
+    hubspotContactId: leadRow.hubspot_contact_id ?? undefined,
+  };
+  const routing: RoutingResult = routingRow
+    ? {
+        team: routingRow.team,
+        owner: routingRow.owner ?? null,
+        confidence: routingRow.confidence,
+        reason: routingRow.reason,
+        flags: routingRow.flags ?? [],
+        checks: routingRow.checks ?? [],
+      }
+    : { team: 'DQ', owner: null, confidence: 0, reason: 'Routing data missing', flags: [], checks: [] };
+  return {
+    id: leadRow.id,
+    lead,
+    answers,
+    routing,
+    closingMessage: routingRow?.closing_message ?? '',
+    receivedAt: leadRow.received_at,
+  };
 }
 
-export function getLead(id: string): StoredLead | undefined {
-  return db().get(id);
+export async function saveLead(input: SaveLeadInput): Promise<StoredLead> {
+  const sb: any = leadIntake();
+  const row = answersToRow(input.lead, input.answers, input.receivedAt);
+
+  const { data: leadData, error: leadErr } = await sb
+    .from('leads')
+    .insert(row)
+    .select()
+    .single();
+
+  if (leadErr || !leadData) {
+    throw new Error(`Supabase insert leads failed: ${leadErr?.message ?? 'unknown'}`);
+  }
+
+  const { error: routingErr } = await sb
+    .from('routing')
+    .insert({
+      lead_id: leadData.id,
+      team: input.routing.team,
+      owner: input.routing.owner,
+      confidence: input.routing.confidence,
+      reason: input.routing.reason,
+      flags: input.routing.flags,
+      checks: input.routing.checks,
+      closing_message: input.closingMessage,
+    });
+
+  if (routingErr) {
+    throw new Error(`Supabase insert routing failed: ${routingErr.message}`);
+  }
+
+  return rowToStored(leadData, {
+    team: input.routing.team,
+    owner: input.routing.owner,
+    confidence: input.routing.confidence,
+    reason: input.routing.reason,
+    flags: input.routing.flags,
+    checks: input.routing.checks,
+    closing_message: input.closingMessage,
+  });
 }
 
-// Seed with a few demo leads so /admin shows something useful on first load.
-function seed(d: Map<string, StoredLead>) {
-  const now = Date.now();
-  const ago = (mins: number) => new Date(now - mins * 60_000).toISOString();
-  const samples: StoredLead[] = [
-    {
-      id: 'L-4821',
-      lead: { firstName: 'Sarah Parker', originalInquiry: 'a backyard remodel in Aptos', email: 'sarah.parker@example.com' },
-      answers: {
-        consent: 'Sure, go ahead',
-        scope: 'Full yard remodel',
-        scopeDetail: 'Outdoor kitchen, fire feature, paver patio with built-in seating',
-        budget: { raw: 175, label: '$175k', tier: 'Full yard remodel' },
-        timeline: '1-3 months',
-        address: { address: '212 Seacliff Dr, Aptos, CA' },
-        photos: { files: [], skipped: false },
-        phone: '(831) 555-0101',
-      },
-      routing: {
-        team: 'Design-Build', owner: 'Rudy', confidence: 94, reason: 'Large design-build remodel ($100k+)', flags: [],
-        checks: [
-          { label: 'Not a one-off / single-trade scope', pass: true },
-          { label: 'Budget at or above $15k floor', pass: true },
-          { label: 'Service area (South San Jose through Santa Cruz, Watsonville, Salinas, Monterey, and down to San Luis Obispo)', pass: true, needsHuman: true },
-          { label: 'Routes to Design-Build (large remodel $100k+)', pass: true },
-        ],
-      },
-      closingMessage: "Perfect, you're all set. Someone from our residential team will reach out within one business day. You'll get a text before any call.",
-      receivedAt: ago(9),
-    },
-    {
-      id: 'L-4820',
-      lead: { firstName: 'Marcus Chen', originalInquiry: 'side-yard drainage in Capitola', email: 'marcus@example.com' },
-      answers: {
-        consent: 'Sure, go ahead',
-        scope: 'Drainage / retaining wall',
-        scopeDetail: 'French drain plus a small retaining wall in the side yard',
-        budget: { raw: 25, label: '$25k', tier: 'Small remodel' },
-        timeline: '1-3 months',
-        address: { address: '410 Park Ave, Capitola, CA' },
-        photos: { files: [], skipped: true },
-        phone: '(831) 555-0142',
-      },
-      routing: {
-        team: 'Res Lite', owner: 'Kendel', confidence: 91, reason: 'Functional enhancement: drainage / retaining wall', flags: [],
-        checks: [
-          { label: 'Not a one-off / single-trade scope', pass: true },
-          { label: 'Budget at or above $15k floor', pass: true },
-          { label: 'Service area (South San Jose through Santa Cruz, Watsonville, Salinas, Monterey, and down to San Luis Obispo)', pass: true, needsHuman: true },
-          { label: 'Routes to Res Lite (drainage / retaining / functional)', pass: true },
-        ],
-      },
-      closingMessage: "Perfect, you're all set. Someone from our residential team will reach out within one business day. You'll get a text before any call.",
-      receivedAt: ago(42),
-    },
-    {
-      id: 'L-4819',
-      lead: { firstName: 'Oakbrook HOA', originalInquiry: 'ongoing landscape maintenance for ~40 units', email: 'pm@oakbrookhoa.com' },
-      answers: {
-        consent: 'Sure, go ahead',
-        scope: 'Commercial or HOA project',
-        scopeDetail: 'Weekly maintenance contract for the common areas, ~40 unit community',
-        budget: { raw: 85, label: '$85k', tier: 'Partial yard' },
-        timeline: "I'm flexible",
-        address: { address: '2200 Oakbrook Way, Watsonville, CA' },
-        photos: { files: [], skipped: true },
-        phone: '(831) 555-0177',
-        union: 'Non-union',
-      },
-      routing: {
-        team: 'Biz Dev', owner: 'Jamie', confidence: 96, reason: 'Commercial/HOA ongoing maintenance contract', flags: [],
-        checks: [
-          { label: 'Not a one-off / single-trade scope', pass: true },
-          { label: 'Budget at or above $15k floor', pass: true },
-          { label: 'Commercial work is non-union', pass: true },
-          { label: 'Service area (South San Jose through Santa Cruz, Watsonville, Salinas, Monterey, and down to San Luis Obispo)', pass: true, needsHuman: true },
-          { label: 'Routes to Biz Dev (commercial/HOA maintenance)', pass: true },
-        ],
-      },
-      closingMessage: "Perfect, you're all set. Someone from our business development team will reach out within one business day.",
-      receivedAt: ago(64),
-    },
-    {
-      id: 'L-4818',
-      lead: { firstName: 'David Weiss', originalInquiry: 'two trees and some mulch', email: 'dweiss@example.com' },
-      answers: {
-        consent: "I've only got a minute",
-        scope: 'Something else',
-        scopeDetail: 'Just need two trees trimmed and maybe some mulch refreshed',
-        budget: { raw: 8, label: '$8k', tier: 'Enhancement size' },
-        timeline: 'ASAP / this month',
-        address: { address: '88 Walnut Ave, Santa Cruz, CA' },
-        photos: { files: [], skipped: true },
-        phone: '(831) 555-0198',
-      },
-      routing: {
-        team: 'DQ', owner: null, confidence: 95, reason: 'Standalone tree work', flags: [],
-        checks: [
-          { label: 'Not a one-off / single-trade scope', pass: false },
-        ],
-      },
-      closingMessage: "Thanks David, someone from our team will be in touch.",
-      receivedAt: ago(125),
-    },
-  ];
-  for (const s of samples) d.set(s.id, s);
+export async function listLeads(): Promise<StoredLead[]> {
+  const sb: any = leadIntake();
+  const { data, error } = await sb
+    .from('leads')
+    .select('*, routing(*)')
+    .order('received_at', { ascending: false })
+    .limit(200);
+
+  if (error) {
+    console.error('[store] listLeads failed:', error);
+    return [];
+  }
+  return (data ?? []).map((row: any) => rowToStored(row, row.routing));
+}
+
+export async function getLead(id: string): Promise<StoredLead | undefined> {
+  const sb: any = leadIntake();
+  const { data, error } = await sb
+    .from('leads')
+    .select('*, routing(*)')
+    .eq('id', id)
+    .maybeSingle();
+
+  if (error || !data) return undefined;
+  return rowToStored(data, data.routing);
 }

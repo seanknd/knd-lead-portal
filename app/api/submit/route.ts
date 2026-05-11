@@ -1,6 +1,6 @@
 // /api/submit — finalize the lead.
 // Computes routing server-side (cheat-sheet logic in lib/routing.ts),
-// stores the lead in the in-memory store so it shows up in /admin,
+// stores the lead via the Supabase-backed store (lib/store.ts),
 // and returns the routing result to the client.
 
 import { NextResponse } from 'next/server';
@@ -21,17 +21,33 @@ export async function POST(req: Request) {
   const routing = computeRouting(body.answers);
   const id = `L-${Date.now().toString().slice(-6)}`;
   const closing = fallbackClose(routing)[0];
-  const stored = saveLead({
-    id,
-    lead: body.lead,
-    answers: body.answers,
-    routing,
-    closingMessage: closing,
-    receivedAt: new Date().toISOString(),
-  });
+
+  // Diagnostic surface: if saveLead throws, we return the error in the
+  // response body so we can see it from the browser/curl. Netlify's free
+  // tier hides server-side stdout, so this is the only way to see what
+  // actually went wrong in production.
+  let stored;
+  try {
+    stored = await saveLead({
+      id,
+      lead: body.lead,
+      answers: body.answers,
+      routing,
+      closingMessage: closing,
+      receivedAt: new Date().toISOString(),
+    });
+  } catch (err: any) {
+    return NextResponse.json({
+      error: 'saveLead failed',
+      message: err?.message ?? String(err),
+      stack: err?.stack?.split('\n').slice(0, 5).join('\n'),
+      hasUrl: Boolean(process.env.SUPABASE_URL),
+      hasKey: Boolean(process.env.SUPABASE_SERVICE_ROLE_KEY),
+      urlPrefix: process.env.SUPABASE_URL?.slice(0, 30),
+    }, { status: 500 });
+  }
 
   // Best-effort HubSpot push (no-op in dev unless env is configured).
-  // Errors are swallowed so the lead's confirmation never depends on HubSpot being up.
   void pushToHubspotBackground(stored).catch(err => console.warn('[submit] hubspot push failed:', err));
 
   return NextResponse.json({
@@ -39,11 +55,11 @@ export async function POST(req: Request) {
     routing,
     closingMessage: closing,
     receivedAt: stored.receivedAt,
+    storedId: stored.id,
   });
 }
 
 async function pushToHubspotBackground(stored: { id: string }) {
   if (!process.env.HUBSPOT_PRIVATE_APP_TOKEN) return;
-  // TODO: real HubSpot client call. Left as a stub to keep the build dep-free.
   console.log('[hubspot] would push lead', stored.id);
 }

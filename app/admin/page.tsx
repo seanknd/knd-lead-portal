@@ -7,7 +7,7 @@ import { listLeads } from '../lib/store';
 export const dynamic = 'force-dynamic';   // always re-render with latest store
 export const metadata = { title: 'Lead Inbox · K&D Landscaping' };
 
-export default function AdminPage() {
-  const leads = listLeads();
+export default async function AdminPage() {
+  const leads = await listLeads();
   return <AdminInbox initialLeads={leads} />;
 }

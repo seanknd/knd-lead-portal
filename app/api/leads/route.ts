@@ -8,5 +8,5 @@ export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
 export async function GET() {
-  return NextResponse.json({ leads: listLeads() });
+  return NextResponse.json({ leads: await listLeads() });
 }

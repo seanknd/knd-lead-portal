@@ -9,7 +9,7 @@ export const runtime = 'nodejs';
 
 export async function POST(req: Request) {
   const { leadId } = await req.json();
-  const lead = getLead(leadId);
+  const lead = await getLead(leadId);
   if (!lead) return NextResponse.json({ error: 'lead not found' }, { status: 404 });
 
   if (!process.env.HUBSPOT_PRIVATE_APP_TOKEN) {
