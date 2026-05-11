@@ -8,7 +8,7 @@
 // row gets backfilled when the chat finalizes via /api/submit.
 
 import { NextResponse } from 'next/server';
-import { supabase, leadIntake, LEAD_PHOTOS_BUCKET } from '../../lib/supabase';
+import { supabase, LEAD_INTAKE_TABLES, LEAD_PHOTOS_BUCKET } from '../../lib/supabase';
 
 export const runtime = 'nodejs';
 
@@ -55,8 +55,8 @@ export async function POST(req: Request) {
 
       // If we know the lead ID already, record the photo row immediately.
       if (leadId) {
-        const li: any = leadIntake();
-        const { error: rowErr } = await li.from('photos').insert({
+        const sb2: any = supabase();
+        const { error: rowErr } = await sb2.from(LEAD_INTAKE_TABLES.photos).insert({
           lead_id: leadId,
           storage_path: path,
           filename: f.name,

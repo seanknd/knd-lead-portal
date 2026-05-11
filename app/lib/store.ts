@@ -2,7 +2,7 @@
 // lead_intake.routing in the K&D Database. Replaces the in-memory Map
 // that was used during development.
 
-import { leadIntake } from './supabase';
+import { supabase, LEAD_INTAKE_TABLES } from './supabase';
 import type { Answers, Lead, RoutingResult, StoredLead } from './types';
 
 interface SaveLeadInput {
@@ -83,11 +83,11 @@ function rowToStored(leadRow: any, routingRow: any | null): StoredLead {
 }
 
 export async function saveLead(input: SaveLeadInput): Promise<StoredLead> {
-  const sb: any = leadIntake();
+  const sb: any = supabase();
   const row = answersToRow(input.lead, input.answers, input.receivedAt);
 
   const { data: leadData, error: leadErr } = await sb
-    .from('leads')
+    .from(LEAD_INTAKE_TABLES.leads)
     .insert(row)
     .select()
     .single();
@@ -97,7 +97,7 @@ export async function saveLead(input: SaveLeadInput): Promise<StoredLead> {
   }
 
   const { error: routingErr } = await sb
-    .from('routing')
+    .from(LEAD_INTAKE_TABLES.routing)
     .insert({
       lead_id: leadData.id,
       team: input.routing.team,
@@ -125,10 +125,10 @@ export async function saveLead(input: SaveLeadInput): Promise<StoredLead> {
 }
 
 export async function listLeads(): Promise<StoredLead[]> {
-  const sb: any = leadIntake();
+  const sb: any = supabase();
   const { data, error } = await sb
-    .from('leads')
-    .select('*, routing(*)')
+    .from(LEAD_INTAKE_TABLES.leads)
+    .select('*, lead_intake_routing(*)')
     .order('received_at', { ascending: false })
     .limit(200);
 
@@ -136,17 +136,17 @@ export async function listLeads(): Promise<StoredLead[]> {
     console.error('[store] listLeads failed:', error);
     return [];
   }
-  return (data ?? []).map((row: any) => rowToStored(row, row.routing));
+  return (data ?? []).map((row: any) => rowToStored(row, row.lead_intake_routing));
 }
 
 export async function getLead(id: string): Promise<StoredLead | undefined> {
-  const sb: any = leadIntake();
+  const sb: any = supabase();
   const { data, error } = await sb
-    .from('leads')
-    .select('*, routing(*)')
+    .from(LEAD_INTAKE_TABLES.leads)
+    .select('*, lead_intake_routing(*)')
     .eq('id', id)
     .maybeSingle();
 
   if (error || !data) return undefined;
-  return rowToStored(data, data.routing);
+  return rowToStored(data, data.lead_intake_routing);
 }
